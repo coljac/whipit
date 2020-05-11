@@ -1,0 +1,3 @@
+# whipit
+
+If you need to whip up a Wordpress site, this script will helop you do it...
