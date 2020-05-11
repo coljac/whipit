@@ -1,0 +1,248 @@
+#!/bin/bash
+# ------------------------------------------------------------------
+# [Colin Jacobs (coljac)] Quick-wp: Instant wordpress
+#          Creates a locally-editable Wordpress, then deploys
+#           a static version to the web with Vercel via GitHub.
+# https://github.com/coljac/quick-wp
+# ------------------------------------------------------------------
+
+SUBJECT=quick-wp
+VERSION=0.1.0
+USAGE="Usage: quickwp -hv args OK"
+
+# --- Option processing --------------------------------------------
+if [ $# == 0 ] ; then
+    echo $USAGE
+    exit 1;
+fi
+
+while getopts ":vh" optname
+  do
+    case "$optname" in
+      "v")
+        echo "Version $VERSION"
+        exit 0;
+        ;;
+      "h")
+        echo $USAGE
+        exit 0;
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        exit 0;
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        exit 0;
+        ;;
+      *)
+        echo "Unknown error while processing options"
+        exit 0;
+        ;;
+    esac
+  done
+
+shift $(($OPTIND - 1))
+
+param1=$1
+param2=$2
+# -----------------------------------------------------------------
+
+LOCK_FILE=/tmp/${SUBJECT}.lock
+
+if [ -f "$LOCK_FILE" ]; then
+echo "Script is already running"
+exit
+fi
+
+# -----------------------------------------------------------------
+trap "rm -f $LOCK_FILE" EXIT
+touch $LOCK_FILE 
+
+wp2static="https://downloads.wordpress.org/plugin/static-html-output-plugin.6.6.7.zip"
+
+
+function bootstrap() {
+    if [ "$(isrunning)" = 1 ]; then
+        echo "Bootstrap failed: Site already running!"
+        echo "'quickwp clean' or 'quickwp purge' to start over."
+        exit 1
+    else
+        echo "Not running, bootstrapping."
+        WP_NAME=$instance_name WORDPRESS_PORT=$wp_port DB_PORT=$mysql_port docker-compose up -d
+
+        # Enable the plugin
+        domain_len=${#domain} 
+        checkrunning
+        if [ "$do_setup" = "true" ]; then
+            echo Setting up Wordpress:
+            sleep 1
+            docker exec wordpress_$instance_name sh -c "docker exec sh /var/www/html/wp-content/setup.sh"
+            echo "Done"
+        fi
+        if [ "$(isrunning)" = 1 ]; then
+            echo "Wordpress up and running, and will shortly be up and running at http://localhost:$wp_port/ ."
+        fi
+    fi
+}
+
+function start() {
+    if [ $(isrunning) != 1 ]; then
+        WP_NAME=$instance_name WORDPRESS_PORT=$wp_port DB_PORT=$mysql_port docker-compose up -d
+    else
+        echo Already running.
+    fi
+}
+
+function stopall() {
+    if [ "$(isrunning)" = 1 ]; then
+        docker ps -a | tail -n +2 | grep $instance_name | awk '// {print $1}'| xargs docker stop > /dev/null
+        echo Stopped.
+    fi
+}
+
+function publish() {
+    echo "git add *; git commit -m 'Publish $(date)'; git push origin master"
+}
+
+function backup() {
+    filename=$1
+    if [ "$(isrunning)" = 0 ]; then
+        start
+    fi
+    docker exec mysql_$instance_name sh -c '/usr/bin/mysqldump --add-drop-table -u wordpress -pwordpress  wordpress > /tmp/db.sql 2>/dev/null'
+    docker cp mysql_$instance_name:/tmp/db.sql $filename
+}
+
+function restore() {
+    filename=$1
+    if [ "$(isrunning)" = 0 ]; then
+        start
+    fi
+    if [ -e "$filename" ]; then
+        echo Restoring $filename
+        docker cp $filename mysql_$instance_name:/tmp/db.sql 
+        docker exec mysql_$instance_name sh -c "/usr/bin/mysql -u wordpress -pwordpress  wordpress < /tmp/db.sql 2> /dev/null"
+    else
+        echo File not found: $filename
+    fi
+}
+
+function purge() {
+    # Delete docker containers, db, and reset
+    # Useful in a branch.
+    stopall
+    WP_NAME=$instance_name WORDPRESS_PORT=$wp_port DB_PORT=$mysql_port docker-compose rm -v
+    # clean '-v'
+}
+
+function status() {
+    if [ $(isrunning) = 1 ]; then
+        echo Running.
+    else
+        echo Stopped.
+    fi
+}
+
+function isrunning() {
+    checkrunning
+    echo $RUNNING
+}
+
+function checkrunning() {
+    RUNNING=$(docker ps | grep "wordpress_$instance_name"'$' | wc -l)
+}
+
+function clean() {
+    stopall
+    echo "docker ps -a | grep "_$instance_name"'$' | awk '// {print $1}' | xargs docker rm $1"
+}
+
+# Credit: Stefan Farestam
+# https://github.com/mrbaseman/parse_yaml
+function parse_yaml {
+   local prefix=$2
+   local s='[[:space:]]*' w='[a-zA-Z0-9_]*' fs=$(echo @|tr @ '\034')
+   sed -ne "s|^\($s\):|\1|" \
+        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
+   awk -F$fs '{
+      indent = length($1)/2;
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+         printf("%s%s%s=\"%s\"\n", "'$prefix'",vn, $2, $3);
+      }
+   }'
+}
+
+# -----------------------------------------------------------------
+#  SCRIPT LOGIC GOES HERE
+# -----------------------------------------------------------------
+checkrunning
+eval $(parse_yaml config.yml)
+
+if [ -z $domain ]; then
+    domain='https://example.domain'
+fi
+
+case "$param1" in 
+    "bootstrap")
+        echo "Bootstrapping:"
+        bootstrap
+        exit 0;
+        ;;
+    "start")
+        echo "Starting..."
+        start
+        exit 0;
+        ;;
+    "stop")
+        echo "Stopping..."
+        stopall
+        exit 0;
+        ;;
+    "clean")
+        echo "Cleaning..."
+        echo "This will delete all docker resources, but not any db backups and the wp-content files."
+        echo "Continue?"
+        clean
+        exit 0;
+        ;;
+    "status" )
+        status
+        exit 0;
+        ;;
+    "restore" )
+        if [ -z $param2 ]; then
+            filename=db/db.sql
+        else
+            filename=$param2
+        fi
+        restore $filename
+        exit 0;
+        ;;
+    "backup" )
+        if [ -z $param2 ]; then
+            filename=db/db.sql
+        else
+            filename=$param2
+        fi
+        echo "Backup to $filename."
+        backup $filename
+        exit 0;
+        ;;
+    "purge" )
+        purge
+        exit 0;
+        ;;
+    "publish" )
+        echo "Publishing..."
+        exit 0;
+        ;;
+esac
+
+
+echo Unknown command: $param1
+

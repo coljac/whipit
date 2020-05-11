@@ -1,0 +1,15 @@
+# Make this unique for github, docker, vercel projects
+instance_name: website
+site_name: My Website
+# The domain the website will ultimately be accessible on; one will be automatically assigned
+domain: 
+token: vercel_token_goes_here
+do_setup: true
+
+# Optional; to tweak if you have more than one web site to manage 
+# at the same time.
+wp_port: 8123
+mysql_port: 3333
+
+# If this is true, the wp-content directory will be saved outside of a docker volume
+save_wp_content: true 
